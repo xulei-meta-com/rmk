@@ -94,6 +94,10 @@ critical-section = { version = "1.2", features = ["std"] }
 env_logger = "0.11"
 ctor = "1.0"
 embedded-hal-mock = { version = "0.11.1", features = ["embedded-hal-async"] }
+# Provided RGB effect engine (PaletteFX port). Test-only: the split-sync gold is
+# generic rmk code; tests drive a real effect engine to verify cross-component
+# coherence. The [patch] below redirects palettefx's rmk git dep to this workspace.
+rmk-palettefx = { git = "https://github.com/jpds/rmk-palettefx", rev = "d61c156a047dca54f01dd8d6bcd655a1eb33d0b6", features = ["rmk"] }
 
 [build-dependencies]
 crc32fast = "1.3"
@@ -268,3 +272,11 @@ _ble = ["dep:trouble-host", "dep:rand_core", "dep:bt-hci", "storage", "rmk-types
 [lib]
 # Don't run doctest for lib
 doctest = false
+
+# rmk-palettefx depends on rmk/rmk-macro via this git source; redirect those to
+# this workspace so the provided effect engine builds against our rmk.
+[patch."https://github.com/HaoboGu/rmk"]
+rmk = { path = "." }
+rmk-macro = { path = "../rmk-macro" }
+rmk-types = { path = "../rmk-types" }
+rmk-config = { path = "../rmk-config" }
