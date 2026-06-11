@@ -8,9 +8,10 @@
 //!   against a wire transport until it closes; emits topic frames between
 //!   request/response turns.
 //!
-//! Topic handling lives in [`topics::TopicSubscribers`] which the session
-//! drains; cache-only events (peripheral status) are mirrored into `ctx`
-//! and not surfaced on the wire.
+//! Topic handling lives in [`topics::TopicSubscribers`], which the session
+//! drains and emits on the wire between request/response turns — these topics
+//! are the only server→host pushes. Snapshot state such as peripheral status
+//! is not a topic; it is pull-only via its `Get*` handler.
 
 mod handlers;
 pub(crate) mod topics;
@@ -27,16 +28,14 @@ use super::context::KeyboardContext;
 use crate::config::RmkConfig;
 use crate::keymap::KeyMap;
 
-const _: () = assert!(
+// Use `core::assert!` explicitly: in a `defmt` build the crate-level `assert!`
+// expands to `defmt::assert!`, whose panic path is not `const`-callable.
+const _: () = core::assert!(
     rmk_types::constants::RYNK_BUFFER_SIZE >= RYNK_MIN_BUFFER_SIZE,
     "rynk_buffer_size is smaller than RYNK_MIN_BUFFER_SIZE — set [rmk] \
      rynk_buffer_size in keyboard.toml, or disable features to shrink the \
      floor",
 );
-
-/// Maximum BLE chunk size that fits in a single GATT write
-#[cfg(feature = "_ble")]
-pub const RYNK_BLE_CHUNK_SIZE: usize = 244;
 
 /// Transport-agnostic Rynk service.
 pub struct RynkService<'a> {
@@ -53,98 +52,83 @@ impl<'a> RynkService<'a> {
     /// Process one inbound message in place. Always writes a response
     /// envelope (Ok or Err) into `msg`; `cmd` and `seq` are echoed verbatim.
     pub async fn dispatch(&self, msg: &mut RynkMessage<'_>) {
-        match self.handle(msg).await {
-            Ok(n) => msg.set_payload_len(n as u16),
-            Err(e) => msg.write_error(e),
-        }
-    }
-
-    async fn handle(&self, msg: &mut RynkMessage<'_>) -> Result<usize, RynkError> {
-        let cmd = msg.cmd();
-        let payload = msg.payload_mut();
-        let payload_len = match cmd {
+        if let Err(e) = match msg.cmd() {
             // System
-            Cmd::GetVersion => self.handle_get_version(payload).await?,
-            Cmd::GetCapabilities => self.handle_get_capabilities(payload).await?,
-            Cmd::Reboot => self.handle_reboot(payload).await?,
-            Cmd::BootloaderJump => self.handle_bootloader_jump(payload).await?,
-            Cmd::StorageReset => self.handle_storage_reset(payload).await?,
+            Cmd::GetVersion => self.handle_get_version(msg).await,
+            Cmd::GetCapabilities => self.handle_get_capabilities(msg).await,
+            Cmd::Reboot => self.handle_reboot(msg).await,
+            Cmd::BootloaderJump => self.handle_bootloader_jump(msg).await,
+            Cmd::StorageReset => self.handle_storage_reset(msg).await,
 
             // Keymap (incl. encoder)
-            Cmd::GetKeyAction => self.handle_get_key_action(payload).await?,
-            Cmd::SetKeyAction => self.handle_set_key_action(payload).await?,
-            Cmd::GetDefaultLayer => self.handle_get_default_layer(payload).await?,
-            Cmd::SetDefaultLayer => self.handle_set_default_layer(payload).await?,
-            Cmd::GetEncoderAction => self.handle_get_encoder_action(payload).await?,
-            Cmd::SetEncoderAction => self.handle_set_encoder_action(payload).await?,
-            #[cfg(feature = "bulk_transfer")]
-            Cmd::GetKeymapBulk => self.handle_get_keymap_bulk(payload).await?,
-            #[cfg(feature = "bulk_transfer")]
-            Cmd::SetKeymapBulk => self.handle_set_keymap_bulk(payload).await?,
+            Cmd::GetKeyAction => self.handle_get_key_action(msg).await,
+            Cmd::SetKeyAction => self.handle_set_key_action(msg).await,
+            Cmd::GetDefaultLayer => self.handle_get_default_layer(msg).await,
+            Cmd::SetDefaultLayer => self.handle_set_default_layer(msg).await,
+            Cmd::GetEncoderAction => self.handle_get_encoder_action(msg).await,
+            Cmd::SetEncoderAction => self.handle_set_encoder_action(msg).await,
+            #[cfg(feature = "bulk")]
+            Cmd::GetKeymapBulk => self.handle_get_keymap_bulk(msg).await,
+            #[cfg(feature = "bulk")]
+            Cmd::SetKeymapBulk => self.handle_set_keymap_bulk(msg).await,
 
             // Macro
-            Cmd::GetMacro => self.handle_get_macro(payload).await?,
-            Cmd::SetMacro => self.handle_set_macro(payload).await?,
+            Cmd::GetMacro => self.handle_get_macro(msg).await,
+            Cmd::SetMacro => self.handle_set_macro(msg).await,
 
             // Combo
-            Cmd::GetCombo => self.handle_get_combo(payload).await?,
-            Cmd::SetCombo => self.handle_set_combo(payload).await?,
-            #[cfg(feature = "bulk_transfer")]
-            Cmd::GetComboBulk => self.handle_get_combo_bulk(payload).await?,
-            #[cfg(feature = "bulk_transfer")]
-            Cmd::SetComboBulk => self.handle_set_combo_bulk(payload).await?,
+            Cmd::GetCombo => self.handle_get_combo(msg).await,
+            Cmd::SetCombo => self.handle_set_combo(msg).await,
+            #[cfg(feature = "bulk")]
+            Cmd::GetComboBulk => self.handle_get_combo_bulk(msg).await,
+            #[cfg(feature = "bulk")]
+            Cmd::SetComboBulk => self.handle_set_combo_bulk(msg).await,
 
             // Morse
-            Cmd::GetMorse => self.handle_get_morse(payload).await?,
-            Cmd::SetMorse => self.handle_set_morse(payload).await?,
-            #[cfg(feature = "bulk_transfer")]
-            Cmd::GetMorseBulk => self.handle_get_morse_bulk(payload).await?,
-            #[cfg(feature = "bulk_transfer")]
-            Cmd::SetMorseBulk => self.handle_set_morse_bulk(payload).await?,
+            Cmd::GetMorse => self.handle_get_morse(msg).await,
+            Cmd::SetMorse => self.handle_set_morse(msg).await,
+            #[cfg(feature = "bulk")]
+            Cmd::GetMorseBulk => self.handle_get_morse_bulk(msg).await,
+            #[cfg(feature = "bulk")]
+            Cmd::SetMorseBulk => self.handle_set_morse_bulk(msg).await,
 
             // Fork
-            Cmd::GetFork => self.handle_get_fork(payload).await?,
-            Cmd::SetFork => self.handle_set_fork(payload).await?,
+            Cmd::GetFork => self.handle_get_fork(msg).await,
+            Cmd::SetFork => self.handle_set_fork(msg).await,
 
             // Behavior
-            Cmd::GetBehaviorConfig => self.handle_get_behavior_config(payload).await?,
-            Cmd::SetBehaviorConfig => self.handle_set_behavior_config(payload).await?,
+            Cmd::GetBehaviorConfig => self.handle_get_behavior_config(msg).await,
+            Cmd::SetBehaviorConfig => self.handle_set_behavior_config(msg).await,
 
             // Connection
-            Cmd::GetConnectionType => self.handle_get_connection_type(payload).await?,
+            Cmd::GetConnectionType => self.handle_get_connection_type(msg).await,
+            Cmd::GetConnectionStatus => self.handle_get_connection_status(msg).await,
             #[cfg(feature = "_ble")]
-            Cmd::GetBleStatus => self.handle_get_ble_status(payload).await?,
+            Cmd::GetBleStatus => self.handle_get_ble_status(msg).await,
             #[cfg(feature = "_ble")]
-            Cmd::SwitchBleProfile => self.handle_switch_ble_profile(payload).await?,
+            Cmd::SwitchBleProfile => self.handle_switch_ble_profile(msg).await,
             #[cfg(feature = "_ble")]
-            Cmd::ClearBleProfile => self.handle_clear_ble_profile(payload).await?,
+            Cmd::ClearBleProfile => self.handle_clear_ble_profile(msg).await,
 
             // Status
-            Cmd::GetCurrentLayer => self.handle_get_current_layer(payload).await?,
-            Cmd::GetMatrixState => self.handle_get_matrix_state(payload).await?,
+            Cmd::GetCurrentLayer => self.handle_get_current_layer(msg).await,
+            Cmd::GetMatrixState => self.handle_get_matrix_state(msg).await,
             #[cfg(feature = "_ble")]
-            Cmd::GetBatteryStatus => self.handle_get_battery_status(payload).await?,
+            Cmd::GetBatteryStatus => self.handle_get_battery_status(msg).await,
             #[cfg(all(feature = "_ble", feature = "split"))]
-            Cmd::GetPeripheralStatus => self.handle_get_peripheral_status(payload).await?,
-            Cmd::GetWpm => self.handle_get_wpm(payload).await?,
-            Cmd::GetSleepState => self.handle_get_sleep_state(payload).await?,
-            Cmd::GetLedIndicator => self.handle_get_led_indicator(payload).await?,
+            Cmd::GetPeripheralStatus => self.handle_get_peripheral_status(msg).await,
+            Cmd::GetWpm => self.handle_get_wpm(msg).await,
+            Cmd::GetSleepState => self.handle_get_sleep_state(msg).await,
+            Cmd::GetLedIndicator => self.handle_get_led_indicator(msg).await,
 
-            // Topic CMDs — host shouldn't be sending these as requests.
-            Cmd::LayerChange | Cmd::WpmUpdate | Cmd::ConnectionChange | Cmd::SleepState | Cmd::LedIndicator => {
-                return Err(RynkError::Invalid);
-            }
-            #[cfg(feature = "_ble")]
-            Cmd::BatteryStatusTopic => return Err(RynkError::Invalid),
-        };
-        Ok(payload_len)
-    }
-
-    /// Encode `value` as the `Ok` arm of a `Result<T, RynkError>` envelope.
-    pub(crate) fn write_response<T: serde::Serialize>(value: &T, payload: &mut [u8]) -> Result<usize, RynkError> {
-        postcard::to_slice(&Ok::<&T, RynkError>(value), payload)
-            .map(|s| s.len())
-            .map_err(|_| RynkError::Internal)
+            // Topic CMDs are server→host push only. `run_session` drops
+            // topic-range frames before dispatch; this arm is defense for
+            // direct `dispatch` callers and unknown future topics.
+            cmd if cmd.is_topic() => Err(RynkError::Invalid),
+            _ => Err(RynkError::UnknownCmd),
+        } {
+            msg.write_error(e);
+        }
     }
 }
 
@@ -188,17 +172,25 @@ impl RynkService<'_> {
                 }
             };
 
-            // 2. Parse the header.
+            // 2. Read the declared payload length (LEN u16 LE) and CMD.
             let payload_n = u16::from_le_bytes([buf[3], buf[4]]) as usize;
             let frame_len = RYNK_HEADER_SIZE + payload_n;
-            if frame_len > buf.len() {
-                // The payload declared won't fit into buf.
-                // Reply with an error then drain the declared payload off
-                // the wire to resync the stream before the next frame.
-                warn!("Rynk: frame_len {} exceeds buffer {}", frame_len, buf.len());
-                let resp_len = RynkMessage::encode_error_reply(&mut buf, RynkError::Malformed);
-                if tx.write_all(&buf[..resp_len]).await.is_err() {
-                    return;
+            let cmd = Cmd::from_le_bytes([buf[0], buf[1]]);
+
+            // 3. Drop non-dispatchable frames, draining the payload to resync
+            // onto the next frame. Topic CMDs are push-only — a reply would be
+            // re-queued by the host as a phantom topic — so drop them silently,
+            // checked first so an oversized topic still draws no error.
+            let is_topic = cmd.is_topic();
+            if is_topic || frame_len > buf.len() {
+                if is_topic {
+                    warn!("Rynk: dropping topic-range request {:?}", cmd);
+                } else {
+                    warn!("Rynk: frame_len {} exceeds buffer {}", frame_len, buf.len());
+                    let resp_len = RynkMessage::encode_error_reply(&mut buf, RynkError::Malformed);
+                    if tx.write_all(&buf[..resp_len]).await.is_err() {
+                        return;
+                    }
                 }
                 let mut remaining = payload_n;
                 while remaining > 0 {
@@ -212,20 +204,23 @@ impl RynkService<'_> {
                 continue;
             }
 
-            // 3. Read exactly the payload.
+            // 4. Read exactly the payload.
             if rx.read_exact(&mut buf[RYNK_HEADER_SIZE..frame_len]).await.is_err() {
                 return;
             }
 
-            // 4. Dispatch in place over the full buffer.
+            // 5. Dispatch in place over the full buffer.
             let resp_len = match RynkMessage::try_from(&mut buf[..]) {
                 Ok(mut msg) => {
                     self.dispatch(&mut msg).await;
                     msg.frame_len()
                 }
                 Err(e) => {
+                    // Steps 1–3 should guarantee the buffer holds the whole
+                    // frame. If validation still fails, echo the structural
+                    // error with cmd/seq preserved.
                     warn!("Rynk: invalid frame: {:?}", e);
-                    RynkMessage::encode_error_reply(&mut buf, RynkError::Malformed)
+                    RynkMessage::encode_error_reply(&mut buf, e)
                 }
             };
             if tx.write_all(&buf[..resp_len]).await.is_err() {
@@ -302,11 +297,20 @@ mod tests {
     /// empty payload — the response is written into the full session buffer,
     /// not this slot, so no padding is needed.
     fn get_version_frame(seq: u8) -> Vec<u8> {
-        let cmd = Cmd::GetVersion as u16;
+        let cmd = Cmd::GetVersion.raw();
         let payload_len: u16 = 0;
         let total = RYNK_HEADER_SIZE + payload_len as usize;
         let mut v = vec![0u8; total];
         v[0..2].copy_from_slice(&cmd.to_le_bytes());
+        v[2] = seq;
+        v[3..5].copy_from_slice(&payload_len.to_le_bytes());
+        v
+    }
+
+    /// A bare 5-byte header with `cmd`, `seq`, and a declared `payload_len`.
+    fn header(cmd_raw: u16, seq: u8, payload_len: u16) -> Vec<u8> {
+        let mut v = vec![0u8; RYNK_HEADER_SIZE];
+        v[0..2].copy_from_slice(&cmd_raw.to_le_bytes());
         v[2] = seq;
         v[3..5].copy_from_slice(&payload_len.to_le_bytes());
         v
@@ -366,11 +370,7 @@ mod tests {
         for (i, expected_seq) in [0u8, 1u8].iter().enumerate() {
             let off = i * RESP_FRAME_LEN;
             let resp = &tx.captured[off..off + RESP_FRAME_LEN];
-            assert_eq!(
-                &resp[0..2],
-                &(Cmd::GetVersion as u16).to_le_bytes(),
-                "response {i} cmd echo",
-            );
+            assert_eq!(&resp[0..2], &Cmd::GetVersion.to_le_bytes(), "response {i} cmd echo",);
             assert_eq!(resp[2], *expected_seq, "response {i} seq echo");
             assert_eq!(
                 &resp[3..5],
@@ -442,7 +442,7 @@ mod tests {
             resp.len() > RYNK_HEADER_SIZE,
             "response must carry a payload, not just a header"
         );
-        assert_eq!(&resp[0..2], &(Cmd::GetVersion as u16).to_le_bytes(), "cmd echo");
+        assert_eq!(&resp[0..2], &Cmd::GetVersion.to_le_bytes(), "cmd echo");
         assert_eq!(resp[2], 0x42, "seq echo");
 
         let payload_len = u16::from_le_bytes([resp[3], resp[4]]) as usize;
@@ -456,5 +456,100 @@ mod tests {
         let decoded: Result<ProtocolVersion, RynkError> =
             postcard::from_bytes(&resp[RYNK_HEADER_SIZE..]).expect("response payload must decode");
         assert_eq!(decoded, Ok(ProtocolVersion::CURRENT));
+    }
+
+    /// A topic-range CMD arriving as a request is dropped without a reply — a
+    /// high-bit error frame would be queued by the host as a phantom topic. Its
+    /// payload is drained, so the session resyncs and answers the next request.
+    #[test]
+    fn run_session_drops_topic_range_request_without_reply() {
+        let mut behavior = BehaviorConfig::default();
+        let positional: PositionalConfig<1, 1> = PositionalConfig::default();
+        let mut data: KeymapData<1, 1, 1, 0> = KeymapData::new([[[KeyAction::No]]]);
+        let keymap = block_on(KeyMap::new(&mut data, &mut behavior, &positional));
+        let config = RmkConfig::default();
+        let service = RynkService::new(&keymap, &config);
+
+        // Topic-range request: LayerChange with a 1-byte payload, then a real
+        // GetVersion — both in one chunk.
+        let mut combined = header(Cmd::LayerChange.raw(), 0, 1);
+        combined.push(0xAB);
+        combined.extend_from_slice(&get_version_frame(7));
+
+        let mut chunks = VecDeque::new();
+        chunks.push_back(combined);
+
+        let mut rx = ChunkRead { chunks };
+        let mut tx = VecWrite { captured: Vec::new() };
+
+        block_on(service.run_session(&mut rx, &mut tx));
+
+        const RESP_FRAME_LEN: usize = RYNK_HEADER_SIZE + 3;
+        assert_eq!(
+            tx.captured.len(),
+            RESP_FRAME_LEN,
+            "topic-range request must draw no reply; only the GetVersion answers"
+        );
+        assert_eq!(&tx.captured[0..2], &Cmd::GetVersion.to_le_bytes(), "cmd echo");
+        assert_eq!(tx.captured[2], 7, "reply is for the GetVersion that followed");
+    }
+
+    /// Regression for the topic/oversize ordering: an oversized declared LEN on
+    /// a topic-range CMD must still draw no reply. Before the fix the oversize
+    /// branch ran first and echoed a high-bit error frame.
+    #[test]
+    fn run_session_oversized_topic_frame_draws_no_reply() {
+        let mut behavior = BehaviorConfig::default();
+        let positional: PositionalConfig<1, 1> = PositionalConfig::default();
+        let mut data: KeymapData<1, 1, 1, 0> = KeymapData::new([[[KeyAction::No]]]);
+        let keymap = block_on(KeyMap::new(&mut data, &mut behavior, &positional));
+        let config = RmkConfig::default();
+        let service = RynkService::new(&keymap, &config);
+
+        // LayerChange topic with LEN = u16::MAX (far past the session buffer);
+        // no payload follows, so the drain hits EOF and the session ends.
+        let mut chunks = VecDeque::new();
+        chunks.push_back(header(Cmd::LayerChange.raw(), 0, u16::MAX));
+
+        let mut rx = ChunkRead { chunks };
+        let mut tx = VecWrite { captured: Vec::new() };
+
+        block_on(service.run_session(&mut rx, &mut tx));
+
+        assert!(
+            tx.captured.is_empty(),
+            "oversized topic-range frame must draw no reply, got {} bytes",
+            tx.captured.len()
+        );
+    }
+
+    /// The non-topic half of the same branch: an oversized declared LEN on a
+    /// normal request still draws a `Malformed` reply with cmd/seq preserved.
+    #[test]
+    fn run_session_oversized_request_replies_malformed() {
+        let mut behavior = BehaviorConfig::default();
+        let positional: PositionalConfig<1, 1> = PositionalConfig::default();
+        let mut data: KeymapData<1, 1, 1, 0> = KeymapData::new([[[KeyAction::No]]]);
+        let keymap = block_on(KeyMap::new(&mut data, &mut behavior, &positional));
+        let config = RmkConfig::default();
+        let service = RynkService::new(&keymap, &config);
+
+        // GetVersion with LEN = u16::MAX; no payload follows, drain hits EOF.
+        let mut chunks = VecDeque::new();
+        chunks.push_back(header(Cmd::GetVersion.raw(), 0x55, u16::MAX));
+
+        let mut rx = ChunkRead { chunks };
+        let mut tx = VecWrite { captured: Vec::new() };
+
+        block_on(service.run_session(&mut rx, &mut tx));
+
+        assert!(!tx.captured.is_empty(), "oversized request must draw a Malformed reply");
+        assert_eq!(&tx.captured[0..2], &Cmd::GetVersion.to_le_bytes(), "cmd echo");
+        assert_eq!(tx.captured[2], 0x55, "seq echo");
+        let payload_len = u16::from_le_bytes([tx.captured[3], tx.captured[4]]) as usize;
+        let decoded: Result<(), RynkError> =
+            postcard::from_bytes(&tx.captured[RYNK_HEADER_SIZE..RYNK_HEADER_SIZE + payload_len])
+                .expect("error reply must decode");
+        assert_eq!(decoded, Err(RynkError::Malformed));
     }
 }
