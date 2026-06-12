@@ -42,6 +42,22 @@ pub(crate) enum SplitMessage {
     KeyboardIndicator(u8),
     /// Layer number from central to peripheral
     Layer(u8),
+    /// Cross-component RGB effect state. Sent central → peripheral on effect change
+    /// and on (re)connect. All ticks are in **central** milliseconds: `start_tick` is
+    /// the epoch when the current effect started (phase origin); `central_tick` is the
+    /// central time at send (clock anchor a peripheral uses to derive its offset).
+    RgbEffect {
+        effect: u8,
+        hue: u8,
+        sat: u8,
+        val: u8,
+        speed: u8,
+        start_tick: u32,
+        central_tick: u32,
+    },
+    /// A reactive RGB hit at global LED position `(x, y)`, stamped in **central** time
+    /// (`at_tick`). Sent peripheral → central, then relayed central → other peripherals.
+    RgbHit { x: u8, y: u8, at_tick: u32 },
     /// WPM from central to peripheral
     #[cfg(feature = "display")]
     Wpm(u16),
