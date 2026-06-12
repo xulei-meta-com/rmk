@@ -6,6 +6,14 @@ use futures::FutureExt;
 use super::SplitMessage;
 use crate::event::{KeyboardEvent, KeyboardEventPos, SubscribableEvent, publish_event, publish_event_async};
 
+/// Fixed RGB effect parameters (single always-on effect; phase origin is central-time 0).
+/// The effect's color computation is provided out of band; only these parameters and the
+/// phase-origin epoch (the `start_tick` an effect carries) are part of the shared contract.
+#[allow(dead_code)]
+pub(crate) const RGB_EFFECT: (u8, u8, u8, u8, u8) = (0, 0, 255, 255, 0); // effect, hue, sat, val, speed
+#[allow(dead_code)]
+pub(crate) const RGB_EFFECT_EPOCH: u32 = 0;
+
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) enum SplitDriverError {
