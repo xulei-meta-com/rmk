@@ -55,9 +55,9 @@ pub(crate) enum SplitMessage {
         start_tick: u32,
         central_tick: u32,
     },
-    /// A reactive RGB hit at global LED position `(x, y)`, stamped in **central** time
-    /// (`at_tick`). Sent peripheral → central, then relayed central → other peripherals.
-    RgbHit { x: u8, y: u8, at_tick: u32 },
+    /// A reactive RGB hit at the pressed key's matrix position `(row, col)`, stamped in
+    /// **central** time (`at_tick`). Sent peripheral → central, then relayed central → other peripherals.
+    RgbHit { row: u8, col: u8, at_tick: u32 },
     /// WPM from central to peripheral
     #[cfg(feature = "display")]
     Wpm(u16),
